@@ -21,13 +21,20 @@ touch $LOG_FILE
 log_event "Ensure log file exists"
 
 log_event "Creating SIEM user"
-sudo adduser $SIEM_USR --disabled-password --gecos "" || log_fail "ERROR: Failed to create $(SIEM_USR)"
+sudo adduser $SIEM_USR --disabled-password --gecos "" || log_fail "ERROR: Failed to create ${SIEM_USR}"
 
-log_event "Update repository index and install hostapd and dnsmasq"
-sudo apt update && sudo apt hostapd dnsmasq -y >> $LOG_FILE || log_fail "ERROR: Could not update repository index or install hostapd and dnsmasq"
+log_event "Update repository index and install package"
+sudo apt update && sudo apt install hostapd dnsmasq openssl cron python -y >> $LOG_FILE || log_fail "ERROR: Could not update repository index or install packages"
+
 
 log_event "Create hostapd.conf file"
-echo ("#Change wlan0 to the wireless device\ninterface=wlan0\ndriver nl80211\n=HomeOpen\nchannel=6") >> ~/hostapd.conf
+cat <<EOF > ~/hostapd.conf 
+# Change wlan0 to the wireless device
+interface=wlan0
+driver=nl80211
+ssid=HomeOpen
+channel=6
+EOF
 
 log_event "Uncomment dhcp_server line in dnsmasq.conf"
 CONFIG_FILE=/etc/dnsmasq.conf
@@ -48,14 +55,14 @@ log_event "Create environment variable secure file"
 
 TOKEN_FILE="$SIEM_FOLDER/.env"
 touch $TOKEN_FILE || log_fail "Could not create the environment variable file"
-chomod 600 "$TOKEN_FILE"
+chmod 600 "$TOKEN_FILE"
 chown matthew:matthew "$TOKEN_FILE"
 echo "API_TOKEN=" > $TOKEN_FILE || log_fail "Could not update the envinment variable file"
 
 log_event "Create token rotation script"
 TOKEN_ROTATE="$SIEM_FOLDER/bin/rotate_token.sh"
 touch $TOKEN_ROTATE || log_fail "Could not create the token rotation script"
-cat <<EOF
+cat <<EOF > $TOKEN_ROTATE || log_fail "Could not update token rotation script"
 #!/bin/bash
 
 # Config
@@ -63,10 +70,10 @@ TOKEN_FILE="$(TOKEN_FILE)"
 TOKEN_LOG_FILE="/var/log/honeypot/token.log"
 
 # Generate new token
-NEW_TOKEN $(openssl rand -hex 32)
+NEW_TOKEN=$(openssl rand -hex 32)
 
 # Replace token file
-echo "API_TOKEN $NEW_TOKEN" > "$TOKEN_FILE"
+echo "API_TOKEN=$NEW_TOKEN" > "$TOKEN_FILE"
 
 # Log rotation
 echo "$(date -Iseconds) | New token generated: ${NEW_TOKEN:0:8}..." >> $TOKEN_LOG_FILE
@@ -74,15 +81,18 @@ echo "$(date -Iseconds) | New token generated: ${NEW_TOKEN:0:8}..." >> $TOKEN_LO
 # Restart API service
 # If this is needed, put this in
 EOF
->>$TOKEN_ROTATE || log_fail "Could not update token rotation script"
 
 log_event "Set token rotation script to update tokens daily"
-chmod -x "$TOKEN_ROTATE" || log_fail "Could not make token rotation script executable"
+chmod +x "$TOKEN_ROTATE" || log_fail "Could not make token rotation script executable"
 
-CRON_JOB "0 3 * * * $TOKEN_ROTATE"
+log_event "Start cron"
+sudo systemctl enable --now cron || log_fail "Could not start cron engine"
 
+CRON_JOB="0 3 * * * $TOKEN_ROTATE"
+
+log_event "Adding token rotation to cron jobs if missing"
 crontab -l 2> /dev/null | grep -F "$CRON_JOB" >/dev/null || (
-	crontab -l 2>/dev/null: echo "$CRON_JOB"
+	crontab -l 2>/dev/null; echo "$CRON_JOB"
 ) | crontab -
 
 log_event "Finished setting up raspberry pi for home honey pot AP"
