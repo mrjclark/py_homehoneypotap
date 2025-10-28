@@ -4,15 +4,15 @@ trap 'log_event "ERROR: Script failed at line $LINENO"' ERR
 
 RPI_SUSR="matthew"
 HONEYPOT_LOG_FOLDER="/usr/var/log/homehoneyport/"
-LOG_FILE="$HONEPOT_LOG_FOLDER/honeypot_setup.log"
+LOG_FILE="$HONEYPOT_LOG_FOLDER/honeypot_setup.log"
 CONFIG_FILE="/etc/dnsmasq.conf"
 TOKEN_ROTATE="/usr/bin/rotate_token.sh"
 GET_EVENTS="/usr/bin/get_events.sh"
 SIEM_USR="siem"
 SIEM_FOLDER="/home/siem/"
 TOKEN_FILE="$SIEM_FOLDER/.env"
-HOSTAPD_LOG_FILE="$SIEM_USR/hostapd.log"
-DNSMASQ_LOG_FILE="$SIEM_USR/dnsmasq.log"
+HOSTAPD_LOG_FILE="$SIEM_FOLDER/var/log/hostapd.log"
+DNSMASQ_LOG_FILE="$SIEM_FOLDER/var/log/dnsmasq.log"
 PYTHON_FOLDER="~/py/"
 
 log_event() {
@@ -20,20 +20,20 @@ log_event() {
 }
 
 log_fail() {
-	log_event $1
+	log_event "ERROR: $1"
 	exit 1
 }
 
 
 mkdir -p $HONEYPOT_LOG_FOLDER
-touch $LOG_FILE || log_fail "ERROR: Could not create setup log file"
+touch $LOG_FILE || log_fail "Could not create setup log file"
 log_event "Ensure log file exists"
 
 log_event "Creating SIEM user"
-sudo adduser $SIEM_USR --disabled-password --gecos "" || log_fail "ERROR: Failed to create user ${SIEM_USR}"
+sudo adduser $SIEM_USR --disabled-password --gecos "" || log_fail "Failed to create user ${SIEM_USR}"
 
 log_event "Update repository index and install package"
-sudo apt update && sudo apt install hostapd dnsmasq openssl cron python3 nginx -y >> $LOG_FILE || log_fail "ERROR: Could not update repository index or install packages"
+sudo apt update && sudo apt install hostapd dnsmasq openssl cron python3 nginx certbot python3-certbot-nginx -y >> $LOG_FILE || log_fail "Could not update repository index or install packages"
 
 
 log_event "Create hostapd.conf file"
@@ -46,16 +46,16 @@ channel=6
 EOF
 
 log_event "Uncomment dhcp_server line in dnsmasq.conf"
-sed -i '/^.*dhcp-range/s/^#//' /etc/dnsmasq.conf || log_fail "ERROR: Failed to uncomment dhcp-range in dnsmasq.conf" 
+sed -i '/^.*dhcp-range/s/^#//' /etc/dnsmasq.conf || log_fail "Failed to uncomment dhcp-range in dnsmasq.conf" 
 
 log_event "Enable hostapd and dnsmasq"
-systemctl unmask hostapd || log_fail "ERROR: Failed to unmask hostapd"
-systemctl enable hostapd || log_fail "ERROR: Failed to enable hostapd"
-systemctl start hostapd || log_fail "ERROR: Failed to start hostapd"
+systemctl unmask hostapd || log_fail "Failed to unmask hostapd"
+systemctl enable hostapd || log_fail "Failed to enable hostapd"
+systemctl start hostapd || log_fail "Failed to start hostapd"
 
 log_event "Create event log for SIEM consumption"
-mkdir $SIEM_FOLDER || log_fail "ERROR: could not create SIEM folder"
-touch $SIEM_FOLDER/honeypot_events.log || log_fail "ERROR: Could not create SIEM log file"
+mkdir $SIEM_FOLDER || log_fail "could not create SIEM folder"
+touch $SIEM_FOLDER/honeypot_events.log || log_fail "Could not create SIEM log file"
 
 log_event "Starting secure token creation and rotation"
 log_event "Create environment variable secure file"
@@ -100,11 +100,11 @@ HOSTAPD_LOG_FILE="${SIEM_USR}"
 DNSMASQ_LOG_FILE="${SIEM_USR}"
 SYSLOG="/var/log/syslog"
 
-1. Get last timestamp from hostapd log
+# Get last timestamp from hostapd log
 LASTTIMESTAMP=\$(tail -1 "\$HOSTAPD_LOG_FILE" | awk '{print \$1, \$2, \$3}')
 LASTEPOCH=\$(date -d "\$LASTTIMESTAMP" +"%s")
 
-2. Filter syslog for newer hostapd events
+# Filter syslog for newer hostapd events
 awk -v last="\$LAST_EPOCH" '
 {
   cmd = "date -d \"" \$1 " " \$2 " " \$3 "\" +\"%s\""
@@ -114,17 +114,17 @@ awk -v last="\$LAST_EPOCH" '
 }
 ' "\$SYSLOG" >> "\$HOSTAPD_LOG_FILE"
 
-1. Get last timestamp from dnsmasq log
+# Get last timestamp from dnsmasq log
 LASTTIMESTAMP=\$(tail -1 "\$DNSMASQ_LOG_FILE" | awk '{print \$1, \$2, \$3}')
 LASTEPOCH=\$(date -d "\$LASTTIMESTAMP" +"%s")
 
-2. Filter syslog for newer hostapd events
+# Filter syslog for newer dnsmasq events
 awk -v last="\$LAST_EPOCH" '
 {
   cmd = "date -d \"" \$1 " " \$2 " " \$3 "\" +\"%s\""
   cmd | getline log_time
   close(cmd)
-  if (log_time > last && \$0 ~ /hostapd/) print
+  if (log_time > last && \$0 ~ /dnsmasq/) print
 }
 ' "\$SYSLOG" >> "\$DNSMASQ_LOG_FILE"
 EOF
@@ -145,6 +145,9 @@ mkdir -p $PYTHON_FOLDER || log_fail "Could not create python folder"
 
 log_event "Add python script requirements"
 pip install -r requirements.txt || log_fail "Could not install python requirements"
+
+log_event "Setting up gunicorn server"
+
 
 log_event "Finished setting up raspberry pi for home honey pot AP"
 
