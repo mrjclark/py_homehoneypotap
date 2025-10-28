@@ -2,10 +2,18 @@
 
 trap 'log_event "ERROR: Script failed at line $LINENO"' ERR
 
-SIEM_USR=siem
-LOG_FILE=/var/log/homehoneypot/honeypot_set.log
-SIEM_FOLDER=/usr/siem
-
+RPI_SUSR="matthew"
+HONEYPOT_LOG_FOLDER="/usr/var/log/homehoneyport/"
+LOG_FILE="$HONEPOT_LOG_FOLDER/honeypot_setup.log"
+CONFIG_FILE="/etc/dnsmasq.conf"
+TOKEN_ROTATE="/usr/bin/rotate_token.sh"
+GET_EVENTS="/usr/bin/get_events.sh"
+SIEM_USR="siem"
+SIEM_FOLDER="/home/siem/"
+TOKEN_FILE="$SIEM_FOLDER/.env"
+HOSTAPD_LOG_FILE="$SIEM_USR/hostapd.log"
+DNSMASQ_LOG_FILE="$SIEM_USR/dnsmasq.log"
+PYTHON_FOLDER="~/py/"
 
 log_event() {
 	echo "$(date -Iseconds) | $1" >> $LOG_FILE
@@ -17,14 +25,15 @@ log_fail() {
 }
 
 
-touch $LOG_FILE
+mkdir -p $HONEYPOT_LOG_FOLDER
+touch $LOG_FILE || log_fail "ERROR: Could not create setup log file"
 log_event "Ensure log file exists"
 
 log_event "Creating SIEM user"
-sudo adduser $SIEM_USR --disabled-password --gecos "" || log_fail "ERROR: Failed to create ${SIEM_USR}"
+sudo adduser $SIEM_USR --disabled-password --gecos "" || log_fail "ERROR: Failed to create user ${SIEM_USR}"
 
 log_event "Update repository index and install package"
-sudo apt update && sudo apt install hostapd dnsmasq openssl cron python -y >> $LOG_FILE || log_fail "ERROR: Could not update repository index or install packages"
+sudo apt update && sudo apt install hostapd dnsmasq openssl cron python3 nginx -y >> $LOG_FILE || log_fail "ERROR: Could not update repository index or install packages"
 
 
 log_event "Create hostapd.conf file"
@@ -37,46 +46,42 @@ channel=6
 EOF
 
 log_event "Uncomment dhcp_server line in dnsmasq.conf"
-CONFIG_FILE=/etc/dnsmasq.conf
 sed -i '/^.*dhcp-range/s/^#//' /etc/dnsmasq.conf || log_fail "ERROR: Failed to uncomment dhcp-range in dnsmasq.conf" 
 
 log_event "Enable hostapd and dnsmasq"
 systemctl unmask hostapd || log_fail "ERROR: Failed to unmask hostapd"
-system enable hostapd || log_fail "ERROR: Failed to enable hostapd"
+systemctl enable hostapd || log_fail "ERROR: Failed to enable hostapd"
 systemctl start hostapd || log_fail "ERROR: Failed to start hostapd"
 
 log_event "Create event log for SIEM consumption"
 mkdir $SIEM_FOLDER || log_fail "ERROR: could not create SIEM folder"
 touch $SIEM_FOLDER/honeypot_events.log || log_fail "ERROR: Could not create SIEM log file"
 
-
 log_event "Starting secure token creation and rotation"
 log_event "Create environment variable secure file"
 
-TOKEN_FILE="$SIEM_FOLDER/.env"
 touch $TOKEN_FILE || log_fail "Could not create the environment variable file"
-chmod 600 "$TOKEN_FILE"
-chown matthew:matthew "$TOKEN_FILE"
+chown $RPI_SUSR:$SIEM_USR "$TOKEN_FILE"
+chmod 640 "$TOKEN_FILE"
 echo "API_TOKEN=" > $TOKEN_FILE || log_fail "Could not update the envinment variable file"
 
 log_event "Create token rotation script"
-TOKEN_ROTATE="$SIEM_FOLDER/bin/rotate_token.sh"
 touch $TOKEN_ROTATE || log_fail "Could not create the token rotation script"
 cat <<EOF > $TOKEN_ROTATE || log_fail "Could not update token rotation script"
 #!/bin/bash
 
 # Config
-TOKEN_FILE="$(TOKEN_FILE)"
+TOKEN_FILE="${TOKEN_FILE}"
 TOKEN_LOG_FILE="/var/log/honeypot/token.log"
 
 # Generate new token
-NEW_TOKEN=$(openssl rand -hex 32)
+NEW_TOKEN=\$(openssl rand -hex 32)
 
 # Replace token file
-echo "API_TOKEN=$NEW_TOKEN" > "$TOKEN_FILE"
+echo "API_TOKEN=\$NEW_TOKEN" > "\$TOKEN_FILE"
 
 # Log rotation
-echo "$(date -Iseconds) | New token generated: ${NEW_TOKEN:0:8}..." >> $TOKEN_LOG_FILE
+echo "\$(date -Iseconds) | New token generated: \${NEW_TOKEN:0:8}..." >> \$TOKEN_LOG_FILE
 
 # Restart API service
 # If this is needed, put this in
@@ -85,15 +90,61 @@ EOF
 log_event "Set token rotation script to update tokens daily"
 chmod +x "$TOKEN_ROTATE" || log_fail "Could not make token rotation script executable"
 
+log_event "Create log update scripts to get new events"
+touch $GET_EVENTS || log_fail "Could not create the get events script"
+cat <<EOF > $GET_EVENTS || log_fail "Could not update the get events script"
+#!/bin/bash
+
+# Config
+HOSTAPD_LOG_FILE="${SIEM_USR}"
+DNSMASQ_LOG_FILE="${SIEM_USR}"
+SYSLOG="/var/log/syslog"
+
+1. Get last timestamp from hostapd log
+LASTTIMESTAMP=\$(tail -1 "\$HOSTAPD_LOG_FILE" | awk '{print \$1, \$2, \$3}')
+LASTEPOCH=\$(date -d "\$LASTTIMESTAMP" +"%s")
+
+2. Filter syslog for newer hostapd events
+awk -v last="\$LAST_EPOCH" '
+{
+  cmd = "date -d \"" \$1 " " \$2 " " \$3 "\" +\"%s\""
+  cmd | getline log_time
+  close(cmd)
+  if (log_time > last && \$0 ~ /hostapd/) print
+}
+' "\$SYSLOG" >> "\$HOSTAPD_LOG_FILE"
+
+1. Get last timestamp from dnsmasq log
+LASTTIMESTAMP=\$(tail -1 "\$DNSMASQ_LOG_FILE" | awk '{print \$1, \$2, \$3}')
+LASTEPOCH=\$(date -d "\$LASTTIMESTAMP" +"%s")
+
+2. Filter syslog for newer hostapd events
+awk -v last="\$LAST_EPOCH" '
+{
+  cmd = "date -d \"" \$1 " " \$2 " " \$3 "\" +\"%s\""
+  cmd | getline log_time
+  close(cmd)
+  if (log_time > last && \$0 ~ /hostapd/) print
+}
+' "\$SYSLOG" >> "\$DNSMASQ_LOG_FILE"
+EOF
+
+chmod +x $GET_EVENTS
+
 log_event "Start cron"
 sudo systemctl enable --now cron || log_fail "Could not start cron engine"
 
-CRON_JOB="0 3 * * * $TOKEN_ROTATE"
+CRON_JOB_1="0 3 * * * $TOKEN_ROTATE"
+CRON_JOB_2="* * * * * $GET_EVENTS"
 
 log_event "Adding token rotation to cron jobs if missing"
-crontab -l 2> /dev/null | grep -F "$CRON_JOB" >/dev/null || (
-	crontab -l 2>/dev/null; echo "$CRON_JOB"
-) | crontab -
+(crontab -l 2>/dev/null; echo "$CRON_JOB_1"; echo "$CRON_JOB_2") | crontab -
+
+log_event "Create python folder"
+mkdir -p $PYTHON_FOLDER || log_fail "Could not create python folder"
+
+log_event "Add python script requirements"
+pip install -r requirements.txt || log_fail "Could not install python requirements"
 
 log_event "Finished setting up raspberry pi for home honey pot AP"
 
