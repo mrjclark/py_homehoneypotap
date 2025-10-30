@@ -2,16 +2,14 @@ from flask import Flask, Response, abort, request
 import os
 from dotenv import load_dotenv
 import datetime
-
-DEV=True
-
+import config
 
 # Variables
-SIEM_USR="siem"
-SIEM_FOLDER=os.path.join("/home",SIEM_USR,"/var/logs")
-LOG_DIR=os.path.join("/var/logs/")
-
-
+SIEM_USR=config.SIEM_USR
+SIEM_FOLDER=config.SIEM_FOLDER
+LOG_DIR="/var/logs/honeypot/"
+app = Flask(__name__)
+DEV=false
 if DEV:
     SIEM_FOLDER="."
     LOG_DIR="."
@@ -29,9 +27,8 @@ def log_request():
     method = request.method
     path = request.path
     ip = request.remote_addr
-    return f"{timestamp} IP:{ip} Method:{method} path:{path}"
+    return f"{timestamp} IP:{ip} Method:{method} path:{path}\n"
     
-app = Flask(__name__)
 
 @app.before_request
 def check_token():
@@ -49,7 +46,7 @@ def get_log(log_name):
     if not os.path.exists(path):
         abort(404)
     log_msg = log_request()
-    with open("./request_log") as f:
+    with open(os.path.join(LOG_DIR, "flask_request.log"), "a") as f:
         f.write(log_msg)
     with open(path) as f:
         return Response(f.read(), mimetype="text/plain")
@@ -57,6 +54,6 @@ def get_log(log_name):
 if __name__ == "__main__":
     app.run(host="0.0.0.0"
             ,port="5000"
-            ,debug=DEV    # Auto reload and detailed error pages
+            ,debug=DEV
             )
     
