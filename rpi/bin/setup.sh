@@ -83,8 +83,10 @@ echo "API_TOKEN=\$NEW_TOKEN" > "\$TOKEN_FILE"
 # Log rotation
 echo "\$(date -Iseconds) | New token generated: \${NEW_TOKEN:0:8}..." >> \$TOKEN_LOG_FILE
 
-# Restart API service
-# If this is needed, put this in
+# Restart API service and nginx
+systemctl restart gunicorn
+set -i "s/X-API-Token .*/X-API-Token $NEW_TOKEN;/" /etc/nginx/sites-available/honeypot
+nginx -t && systemctl reload nginx
 EOF
 
 log_event "Set token rotation script to update tokens daily"
@@ -146,8 +148,52 @@ mkdir -p $PYTHON_FOLDER || log_fail "Could not create python folder"
 log_event "Add python script requirements"
 pip install -r requirements.txt || log_fail "Could not install python requirements"
 
-log_event "Setting up gunicorn server"
+log_event "Create python config file"
+touch $PYTHON_FOLDER/config.py || log_fail "Could not create python config file"
+echo <<EOF SIEM_USR="${SIEM_USR}" > $PYTHON_FOLDER/config.py || log_fail "Could not update python config file"
+SIEM_FOLDER="${SIEM_FOLDER}"
+TOKEN_FILE="${TOKEN_FILE}"
+HOSTAPD_LOG_FILE="${HOSTAPD_LOG_FILE}"
+DNSMASQ_LOG_FILE="${DNSMASQ_LOG_FILE}"
+EOF
 
+log_event "Setting up gunicorn server"
+touch /etc/systemd/system/gunicorn.service || log_fail "Could not create service file for gunicorn"
+echo <<EOF [Unit]> /etc/systemd/system/gunicorn.servce || log_fail "Could not update service file for gunicorn"
+Description=Gunicorn daemon for Flask honeypot log collection
+After=network.target
+
+[Service]
+User=${RPI_SUSR}
+Group=www-data
+WorkingDirectory=${PYTHON_FOLDER}
+ExecStart=/usr/bin/gunicorn --workers 4 --bind 127.0.0.1:8000 webapp:app
+Environment="API_TOKEN=$API_TOKEN"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+log_event "Setting up nginx"
+touch /etc/nginx/sites-available/honeypot || log_fail "Could not create nginx site config file"
+echo <<EOF server{> /etc/nginx/sites-available/honeypot ||log_fail "Could not update nginx site config"
+	listen 80;
+	server_name homehoneypot;
+
+	location /logs/ {
+		proxy_pass http://127.0.0.1:8000/logs/;
+		proxy_set_header Host $host;
+		proxy_set_header X-Real-IP $remote_addr;
+		proxy_set_header X-API-Token $API_TOKEN;
+	}
+
+	access_log /var/log/nginx/honeypot_access.log;
+	error_log /var/log/nginx/honeypot_error.log;
+}
+EOF
+sudo ln -s /etc/nginx/sites-available/honeypot /etc/nginx/sites-enabled/ || log_fail "Could not create symbolic link to enabled sites folder"
+sudo nginx -t || log_fail "Failed nginx testing, check config file for issues"
+sudo systemctl reload nginx || log_fail "Could not reload the nginx service"
 
 log_event "Finished setting up raspberry pi for home honey pot AP"
 
