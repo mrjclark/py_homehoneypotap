@@ -3,16 +3,16 @@
 trap 'log_event "ERROR: Script failed at line $LINENO"' ERR
 
 RPI_SUSR="matthew"
-HONEYPOT_LOG_FOLDER="/usr/var/log/homehoneyport/"
-LOG_FILE="$HONEYPOT_LOG_FOLDER/honeypot_setup.log"
+HONEYPOT_LOG_FOLDER="/home/${RPI_SUSR}/var/log/homehoneypot/"
+LOG_FILE="${HONEYPOT_LOG_FOLDER}/honeypot_setup.log"
 CONFIG_FILE="/etc/dnsmasq.conf"
 TOKEN_ROTATE="/usr/bin/rotate_token.sh"
 GET_EVENTS="/usr/bin/get_events.sh"
 SIEM_USR="siem"
-SIEM_FOLDER="/home/siem/"
-TOKEN_FILE="$SIEM_FOLDER/.env"
-HOSTAPD_LOG_FILE="$SIEM_FOLDER/var/log/hostapd.log"
-DNSMASQ_LOG_FILE="$SIEM_FOLDER/var/log/dnsmasq.log"
+SIEM_FOLDER="/home/${SIEM_USR}/"
+TOKEN_FILE="${SIEM_FOLDER}/.env"
+HOSTAPD_LOG_FILE="${SIEM_FOLDER}/var/log/hostapd.log"
+DNSMASQ_LOG_FILE="${SIEM_FOLDER}/var/log/dnsmasq.log"
 PYTHON_FOLDER="~/py/"
 
 log_event() {
@@ -30,10 +30,15 @@ touch $LOG_FILE || log_fail "Could not create setup log file"
 log_event "Ensure log file exists"
 
 log_event "Creating SIEM user"
-sudo adduser $SIEM_USR --disabled-password --gecos "" || log_fail "Failed to create user ${SIEM_USR}"
+if id "$SIEM_USR" &>/dev/null; then
+	log_event "User ${SIEM_USR} already exists"
+else
+	 sudo adduser $SIEM_USR --disabled-password --gecos "" || log_fail "Failed to create user ${SIEM_USR}"
+fi
 
 log_event "Update repository index and install package"
-sudo apt update && sudo apt install hostapd dnsmasq openssl cron python3 nginx certbot python3-certbot-nginx -y >> $LOG_FILE || log_fail "Could not update repository index or install packages"
+sudo apt update && sudo apt update -y
+sudo apt install hostapd dnsmasq openssl cron python3 nginx certbot python3-certbot-nginx -y >> $LOG_FILE || log_fail "Could not update repository index or install packages"
 
 
 log_event "Create hostapd.conf file"
@@ -54,7 +59,7 @@ systemctl enable hostapd || log_fail "Failed to enable hostapd"
 systemctl start hostapd || log_fail "Failed to start hostapd"
 
 log_event "Create event log for SIEM consumption"
-mkdir $SIEM_FOLDER || log_fail "could not create SIEM folder"
+mkdir -p $SIEM_FOLDER || log_fail "could not create SIEM folder"
 touch $SIEM_FOLDER/honeypot_events.log || log_fail "Could not create SIEM log file"
 
 log_event "Starting secure token creation and rotation"
