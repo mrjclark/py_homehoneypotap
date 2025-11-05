@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
 trap 'log_event "ERROR: Script failed at line $LINENO"' ERR
 
@@ -68,13 +69,6 @@ log_event "Create environment variable secure file"
 touch $TOKEN_FILE || log_fail "Could not create the environment variable file"
 chown $RPI_SUSR:$SIEM_USR "$TOKEN_FILE"
 chmod 640 "$TOKEN_FILE"
-echo "API_TOKEN=" > $TOKEN_FILE || log_fail "Could not update the envinment variable file"
-export $(cat $TOKEN_FILE)
-if grep -q '^export $(cat' ~/.bashrc; then
-	log_event "API_TOKEN loading exists in bashrc"
-else
-	echo 'export \$(cat ${TOKEN_FILE})' >> ~/.bashrc || log_fail "Could not update .bashrc file with environment variable setups"
-fi
 
 log_event "Create token rotation script"
 touch $TOKEN_ROTATE || log_fail "Could not create the token rotation script"
