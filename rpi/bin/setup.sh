@@ -13,10 +13,10 @@ SIEM_FOLDER="/home/${SIEM_USR}/"
 TOKEN_FILE="${SIEM_FOLDER}/.env"
 HOSTAPD_LOG_FILE="${SIEM_FOLDER}/var/log/hostapd.log"
 DNSMASQ_LOG_FILE="${SIEM_FOLDER}/var/log/dnsmasq.log"
-PYTHON_FOLDER="~/py/"
+PYTHON_FOLDER="/home/${RPI_SUSR}/py/"
 
 log_event() {
-	echo "$(date -Iseconds) | $1" >> $LOG_FILE
+	echo "$(date -Iseconds) | $1" | tee -a $LOG_FILE
 }
 
 log_fail() {
@@ -37,12 +37,12 @@ else
 fi
 
 log_event "Update repository index and install package"
-sudo apt update && sudo apt update -y
+sudo apt update && sudo apt upgrade -y
 sudo apt install hostapd dnsmasq openssl cron python3 nginx certbot python3-certbot-nginx -y >> $LOG_FILE || log_fail "Could not update repository index or install packages"
 
 
 log_event "Create hostapd.conf file"
-cat <<EOF > ~/hostapd.conf 
+cat <<EOF > /home/$RPI_SUSR/hostapd.conf
 # Change wlan0 to the wireless device
 interface=wlan0
 driver=nl80211
@@ -69,6 +69,12 @@ touch $TOKEN_FILE || log_fail "Could not create the environment variable file"
 chown $RPI_SUSR:$SIEM_USR "$TOKEN_FILE"
 chmod 640 "$TOKEN_FILE"
 echo "API_TOKEN=" > $TOKEN_FILE || log_fail "Could not update the envinment variable file"
+export $(cat $TOKEN_FILE)
+if grep -q '^export $(cat' ~/.bashrc; then
+	log_event "API_TOKEN loading exists in bashrc"
+else
+	echo 'export \$(cat ${TOKEN_FILE})' >> ~/.bashrc || log_fail "Could not update .bashrc file with environment variable setups"
+fi
 
 log_event "Create token rotation script"
 touch $TOKEN_ROTATE || log_fail "Could not create the token rotation script"
@@ -84,6 +90,7 @@ NEW_TOKEN=\$(openssl rand -hex 32)
 
 # Replace token file
 echo "API_TOKEN=\$NEW_TOKEN" > "\$TOKEN_FILE"
+export $(sudo cat ${TOKEN_FILE})
 
 # Log rotation
 echo "\$(date -Iseconds) | New token generated: \${NEW_TOKEN:0:8}..." >> \$TOKEN_LOG_FILE
@@ -151,11 +158,14 @@ log_event "Create python folder"
 mkdir -p $PYTHON_FOLDER || log_fail "Could not create python folder"
 
 log_event "Add python script requirements"
-pip install -r requirements.txt || log_fail "Could not install python requirements"
+python -m venv ~/py/venv
+source ~/py/venv/bin/activate
+pip install -r /home/$RPI_SUSR/py_homehoneypotap/rpi/py/requirements.txt || log_fail "Could not install python requirements"
 
 log_event "Create python config file"
 touch $PYTHON_FOLDER/config.py || log_fail "Could not create python config file"
-echo <<EOF SIEM_USR="${SIEM_USR}" > $PYTHON_FOLDER/config.py || log_fail "Could not update python config file"
+cat <<EOF  > $PYTHON_FOLDER/config.py || log_fail "Could not update python config file"
+SIEM_USR="${SIEM_USR}"
 SIEM_FOLDER="${SIEM_FOLDER}"
 TOKEN_FILE="${TOKEN_FILE}"
 HOSTAPD_LOG_FILE="${HOSTAPD_LOG_FILE}"
@@ -163,8 +173,10 @@ DNSMASQ_LOG_FILE="${DNSMASQ_LOG_FILE}"
 EOF
 
 log_event "Setting up gunicorn server"
+log_event "Creating gunicorn service file"
 touch /etc/systemd/system/gunicorn.service || log_fail "Could not create service file for gunicorn"
-echo <<EOF [Unit]> /etc/systemd/system/gunicorn.servce || log_fail "Could not update service file for gunicorn"
+cat <<EOF > /etc/systemd/system/gunicorn.service || log_fail "Could not update service file for gunicorn"
+[Unit]
 Description=Gunicorn daemon for Flask honeypot log collection
 After=network.target
 
@@ -173,32 +185,43 @@ User=${RPI_SUSR}
 Group=www-data
 WorkingDirectory=${PYTHON_FOLDER}
 ExecStart=/usr/bin/gunicorn --workers 4 --bind 127.0.0.1:8000 webapp:app
-Environment="API_TOKEN=$API_TOKEN"
+EnvironmentFile=${TOKEN_FILE}
+Restart=Always
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
+log_event "Unmasking and enabling Gunicorn service"
+sudo systemctl unmask gunicorn.service || log_fail "Failed to unmask Gunicorn"
+sudo systemctl daemon-reload || log_fail "Failed to reload systemd"
+sudo systemctl enable gunicorn.service || log_fail "Failed to enable Gunicorn"
+sudo systemctl start gunicorn.service || log_fail "Failed to start Gunicorn"
+
 log_event "Setting up nginx"
 touch /etc/nginx/sites-available/honeypot || log_fail "Could not create nginx site config file"
-echo <<EOF server{> /etc/nginx/sites-available/honeypot ||log_fail "Could not update nginx site config"
-	listen 80;
-	server_name homehoneypot;
+sudo tee /etc/nginx/sites-available/honeypot > /dev/null <<EOF
+server{
+        listen 80;
+        server_name homehoneypot;
 
-	location /logs/ {
-		proxy_pass http://127.0.0.1:8000/logs/;
-		proxy_set_header Host $host;
-		proxy_set_header X-Real-IP $remote_addr;
-		proxy_set_header X-API-Token $API_TOKEN;
-	}
 
-	access_log /var/log/nginx/honeypot_access.log;
+        location /logs/ {
+                proxy_pass http://127.0.0.1:8000/logs/;
+		proxy_set_header Host \$host;
+                proxy_set_header X-Real-IP \$remote_addr;
+                proxy_set_header X-API-Token api_token;
+        }
+
+        access_log /var/log/nginx/honeypot_access.log;
 	error_log /var/log/nginx/honeypot_error.log;
 }
 EOF
-sudo ln -s /etc/nginx/sites-available/honeypot /etc/nginx/sites-enabled/ || log_fail "Could not create symbolic link to enabled sites folder"
+if [ ! -e /etc/nginx/sites-enabled/honeypot ]; then
+	sudo ln -s /etc/nginx/sites-available/honeypot /etc/nginx/sites-enabled/ || log_fail "Could not create symbolic link to enabled sites folder"
+fi
 sudo nginx -t || log_fail "Failed nginx testing, check config file for issues"
-sudo systemctl reload nginx || log_fail "Could not reload the nginx service"
+sudo systemctl start nginx || log_fail "Could not start the nginx service"
 
 log_event "Finished setting up raspberry pi for home honey pot AP"
 
